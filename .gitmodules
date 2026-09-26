@@ -1,6 +1,6 @@
 [submodule "frontend"]
 	path = frontend
-	url = git@sigpima-github-push:sigpima/twistfit-fe.git
+	url = git@github.com:sigpima/twistfit-fe.git
 [submodule "backend"]
 	path = backend
-	url = git@sigpima-github-push:sigpima/twistfit-be.git
+	url = git@github.com:sigpima/twistfit-be.git
