@@ -4,9 +4,9 @@
 # proxy nữa, chỉ publish port thẳng ra host cho nginx system trỏ vào (xem
 # deploy/nginx.conf — giờ là file tham khảo để dán vào nginx system, không
 # phải config chạy trong container nữa):
-#   - frontend -> host 33002
-#   - minio (S3 API) -> host 33000
-#   - minio (console quản trị) -> host 33001
+#   - frontend -> host 34002
+#   - minio (S3 API) -> host 34000
+#   - minio (console quản trị) -> host 34001
 #
 # 2 network:
 #   - "public_net": frontend + minio — 2 service cần publish port ra host.
@@ -49,7 +49,7 @@ services:
       backend:
         condition: service_healthy
     ports:
-      - "127.0.0.1:33002:3000"
+      - "127.0.0.1:34002:3000"
     networks:
       - public_net
       - private_net
@@ -152,9 +152,9 @@ services:
       # publish thẳng theo yêu cầu, nhưng nên tự giới hạn thêm ở nginx
       # system/firewall (IP allowlist) vì console chỉ cần login đúng root
       # user/pass là vào được, không có gì chặn thêm ở tầng network nữa.
-      - "127.0.0.1:33000:9000"
-      - "127.0.0.1:33001:9001"
-      - "${PRIVATE_SUBNET}:33001:9001"
+      - "127.0.0.1:34000:9000"
+      - "127.0.0.1:34001:9001"
+      - "${PRIVATE_SUBNET}:34001:9001"
     volumes:
       - minio_data:/data
     networks:
