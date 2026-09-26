@@ -1,39 +1,30 @@
 # DRAFT — để hình dung kiến trúc deploy, chưa phải bản production cuối cùng.
 #
-# Nguyên tắc network: chỉ "reverse-proxy" publish port ra host (80/443).
-# frontend/backend/db/minio đều KHÔNG publish port — chỉ gọi nhau qua tên
-# service trong network nội bộ "app_net". Đây là cách "backend private,
-# không public" mà không cần internal:true (backend vẫn cần internet ra
-# ngoài để gọi Gemini/Flux/catvton-service trên Vast.ai).
+# Server đã có sẵn nginx chạy ngoài Docker — file này KHÔNG tự chạy reverse
+# proxy nữa, chỉ publish port thẳng ra host cho nginx system trỏ vào (xem
+# deploy/nginx.conf — giờ là file tham khảo để dán vào nginx system, không
+# phải config chạy trong container nữa):
+#   - frontend -> host 33002
+#   - minio (S3 API) -> host 33000
+#   - minio (console quản trị) -> host 33001
+#
+# 2 network:
+#   - "public_net": frontend + minio — 2 service cần publish port ra host.
+#   - "private_net": backend + db + frontend + minio — network nội bộ để
+#     4 service gọi nhau qua tên service (backend/db KHÔNG publish port,
+#     không nằm trên public_net — đây là cách "backend private").
+# Cả 2 network hiện đều là bridge thường (không internal:true) — nếu muốn
+# khoá private_net không cho ra Internet luôn thì backend sẽ mất internet
+# (đang cần gọi Gemini/Flux/catvton-service trên Vast.ai), phải tính riêng.
 #
 # image "ghcr.io/sigpima/minio": MinIO community edition không còn cho pull
 # image free trên Docker Hub nữa (source-only từ giờ) — image này do chính
 # mình build từ source qua .github/workflows/build-minio.yml, chứa cả 2
 # binary "minio" (server) và "mc" (client, dùng ở minio-init-policy).
 #
-# TLS/Let's Encrypt cho reverse-proxy và backup cho postgres_data/minio_data
-# vẫn chưa làm (nginx.conf draft chỉ có HTTP) — làm ở bước sau.
+# Backup cho postgres_data/minio_data vẫn chưa làm — làm ở bước sau.
 
 services:
-  reverse-proxy:
-    image: nginx:1.27-alpine
-    depends_on:
-      - frontend
-      - minio
-    ports:
-      - "80:80"
-      # - "443:443"   # bật khi có cert TLS
-    volumes:
-      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      # - ./deploy/certs:/etc/nginx/certs:ro
-    networks:
-      - app_net
-    restart: unless-stopped
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
 
   frontend:
     # GitHub Actions (twistfit-fe repo) build + push image này lên GHCR mỗi
@@ -57,8 +48,11 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+    ports:
+      - "33002:3000"
     networks:
-      - app_net
+      - public_net
+      - private_net
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000', r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))"]
@@ -98,7 +92,7 @@ services:
       minio-init-policy:
         condition: service_completed_successfully
     networks:
-      - app_net
+      - private_net
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
@@ -124,7 +118,7 @@ services:
       # trong. Mount nhầm chỗ cũ sẽ crash-loop ngay lúc khởi động.
       - postgres_data:/var/lib/postgresql
     networks:
-      - app_net
+      - private_net
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
@@ -152,10 +146,19 @@ services:
       # biến này là "*" (cho phép mọi origin) nếu không set; ghi rõ ra đây
       # để giới hạn đúng domain thật, thay vì để mặc định wildcard.
       MINIO_API_CORS_ALLOW_ORIGIN: ${MINIO_CORS_ALLOW_ORIGIN:-https://twistfit.org}
+    ports:
+      # 9000 = S3 API (browser PUT thẳng vào bằng presigned URL, qua nginx
+      # system ở domain storage.twistfit.org). 9001 = console quản trị —
+      # publish thẳng theo yêu cầu, nhưng nên tự giới hạn thêm ở nginx
+      # system/firewall (IP allowlist) vì console chỉ cần login đúng root
+      # user/pass là vào được, không có gì chặn thêm ở tầng network nữa.
+      - "33000:9000"
+      - "33001:9001"
     volumes:
       - minio_data:/data
     networks:
-      - app_net
+      - public_net
+      - private_net
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
@@ -168,10 +171,6 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-    # Port 9000 (S3 API) chỉ lộ ra ngoài qua reverse-proxy ở domain
-    # storage.twistfit.org (browser PUT thẳng vào đây bằng presigned URL).
-    # Port 9001 (console quản trị) KHÔNG expose qua reverse-proxy — muốn
-    # vào console thì SSH tunnel: ssh -L 9001:localhost:9001 <server>
 
   # Job một lần (restart: "no"), tạo sẵn 5 bucket + set public-read policy
   # bằng đúng code app đang dùng (ensure_container trong
@@ -196,7 +195,7 @@ services:
       minio:
         condition: service_healthy
     networks:
-      - app_net
+      - private_net
     restart: "no"
 
   # Job một lần, tạo user riêng (MINIO_APP_ACCESS_KEY) chỉ có quyền
@@ -223,11 +222,12 @@ services:
       minio:
         condition: service_healthy
     networks:
-      - app_net
+      - private_net
     restart: "no"
 
 networks:
-  app_net:
+  public_net:
+  private_net:
 
 volumes:
   postgres_data:
