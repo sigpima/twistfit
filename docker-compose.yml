@@ -28,10 +28,11 @@ services:
     restart: unless-stopped
 
   frontend:
-    build:
-      context: ./frontend
-      # Không cần build-arg NEXT_PUBLIC_API_BASE_URL nữa — apiClient.ts mặc
-      # định dùng path tương đối "/api" cho browser (xem .env.example).
+    # GitHub Actions (twistfit-fe repo) build + push image này lên GHCR mỗi
+    # lần push — server chỉ pull, không tự build. Không cần build-arg
+    # NEXT_PUBLIC_API_BASE_URL — apiClient.ts mặc định dùng path tương đối
+    # "/api" cho browser (xem .env.example).
+    image: ghcr.io/sigpima/twistfit-fe:latest
     env_file:
       - ./frontend/.env
     environment:
@@ -46,7 +47,9 @@ services:
     restart: unless-stopped
 
   backend:
-    build: ./backend
+    # GitHub Actions (twistfit-be repo) build + push image này lên GHCR mỗi
+    # lần push — server chỉ pull, không tự build.
+    image: ghcr.io/sigpima/twistfit-be:latest
     env_file:
       - ./backend/.env
     environment:
