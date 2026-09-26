@@ -1,3 +1,6 @@
 resource
 .cc-history
 .superpowers
+.env
+.env.*
+!.env.example
