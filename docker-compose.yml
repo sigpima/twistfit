@@ -6,10 +6,13 @@
 # không public" mà không cần internal:true (backend vẫn cần internet ra
 # ngoài để gọi Gemini/Flux/catvton-service trên Vast.ai).
 #
-# Next proxy (browser -> Next -> backend, xem frontend/next.config.ts +
-# frontend/lib/apiClient.ts) và MinIO migration (backend/app/core/blob_storage.py)
-# đã code xong — phần còn lại là TLS/Let's Encrypt cho reverse-proxy
-# (nginx.conf draft chỉ có HTTP).
+# image "ghcr.io/sigpima/minio": MinIO community edition không còn cho pull
+# image free trên Docker Hub nữa (source-only từ giờ) — image này do chính
+# mình build từ source qua .github/workflows/build-minio.yml, chứa cả 2
+# binary "minio" (server) và "mc" (client, dùng ở minio-init-policy).
+#
+# TLS/Let's Encrypt cho reverse-proxy và backup cho postgres_data/minio_data
+# vẫn chưa làm (nginx.conf draft chỉ có HTTP) — làm ở bước sau.
 
 services:
   reverse-proxy:
@@ -26,13 +29,20 @@ services:
     networks:
       - app_net
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   frontend:
     # GitHub Actions (twistfit-fe repo) build + push image này lên GHCR mỗi
     # lần push — server chỉ pull, không tự build. Không cần build-arg
     # NEXT_PUBLIC_API_BASE_URL — apiClient.ts mặc định dùng path tương đối
     # "/api" cho browser (xem .env.example).
-    image: ghcr.io/sigpima/twistfit-fe:latest
+    # FRONTEND_IMAGE_TAG cho phép ghim/rollback về 1 bản build cụ thể (VD
+    # 1 git SHA CI đã push) thay vì luôn lấy :latest — xem .env.example.
+    image: ghcr.io/sigpima/twistfit-fe:${FRONTEND_IMAGE_TAG:-latest}
     env_file:
       - ./frontend/.env
     environment:
@@ -41,63 +51,166 @@ services:
       # không lộ ra browser bundle.
       BACKEND_INTERNAL_URL: http://backend:8000
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     networks:
       - app_net
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000', r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   backend:
     # GitHub Actions (twistfit-be repo) build + push image này lên GHCR mỗi
-    # lần push — server chỉ pull, không tự build.
-    image: ghcr.io/sigpima/twistfit-be:latest
+    # lần push — server chỉ pull, không tự build. BACKEND_IMAGE_TAG: xem
+    # ghi chú FRONTEND_IMAGE_TAG ở trên, cùng cơ chế.
+    image: ghcr.io/sigpima/twistfit-be:${BACKEND_IMAGE_TAG:-latest}
     env_file:
       - ./backend/.env
     environment:
       # Trỏ về MinIO thay vì Azurite. MINIO_PUBLIC_ENDPOINT phải khớp đúng
-      # domain mà nginx expose ở dưới (server_name storage.twistfit.vn) vì
+      # domain mà nginx expose ở dưới (server_name storage.twistfit.org) vì
       # SigV4 ký cả Host header — xem generate_upload_sas_url trong
       # backend/app/core/blob_storage.py.
       MINIO_ENDPOINT: http://minio:9000
-      MINIO_PUBLIC_ENDPOINT: https://storage.twistfit.org
-      # Dùng root credentials cho draft này. Lên production thật nên tạo
-      # service account/policy riêng cho từng bucket (mc admin user/policy)
-      # thay vì để backend cầm quyền root của MinIO.
-      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
-      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:?thiếu MINIO_PUBLIC_ENDPOINT trong .env}
+      # Dùng user riêng (scope theo từng bucket, tạo bởi minio-init-policy),
+      # không còn dùng quyền root của MinIO nữa.
+      MINIO_ACCESS_KEY: ${MINIO_APP_ACCESS_KEY:?thiếu MINIO_APP_ACCESS_KEY trong .env}
+      MINIO_SECRET_KEY: ${MINIO_APP_SECRET_KEY:?thiếu MINIO_APP_SECRET_KEY trong .env}
     depends_on:
-      - db
-      - minio
+      db:
+        condition: service_healthy
+      minio-init-buckets:
+        condition: service_completed_successfully
+      minio-init-policy:
+        condition: service_completed_successfully
     networks:
       - app_net
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   db:
     image: postgres:18.6
     environment:
-      POSTGRES_USER: twistfit
-      POSTGRES_PASSWORD: twistfit
-      POSTGRES_DB: twistfit_dev
+      POSTGRES_USER: ${POSTGRES_USER:?thiếu POSTGRES_USER trong .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?thiếu POSTGRES_PASSWORD trong .env}
+      POSTGRES_DB: ${POSTGRES_DB:?thiếu POSTGRES_DB trong .env}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - app_net
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   minio:
-    image: minio/minio:latest
+    # Xem ghi chú "ghcr.io/sigpima/minio" ở đầu file — image tự build, không
+    # còn dùng minio/minio (Docker Hub) được nữa.
+    image: ghcr.io/sigpima/minio:${MINIO_IMAGE_TAG:-latest}
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?thiếu MINIO_ROOT_USER trong .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?thiếu MINIO_ROOT_PASSWORD trong .env}
     volumes:
       - minio_data:/data
     networks:
       - app_net
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     # Port 9000 (S3 API) chỉ lộ ra ngoài qua reverse-proxy ở domain
-    # storage.twistfit.vn (browser PUT thẳng vào đây bằng presigned URL).
+    # storage.twistfit.org (browser PUT thẳng vào đây bằng presigned URL).
     # Port 9001 (console quản trị) KHÔNG expose qua reverse-proxy — muốn
     # vào console thì SSH tunnel: ssh -L 9001:localhost:9001 <server>
+
+  # Job một lần (restart: "no"), tạo sẵn 5 bucket + set public-read policy +
+  # CORS bằng đúng code app đang dùng (ensure_container trong
+  # backend/app/core/blob_storage.py) — chạy bằng quyền root MinIO, xong thì
+  # backend chỉ cần quyền hạn chế (xem minio-init-policy).
+  minio-init-buckets:
+    image: ghcr.io/sigpima/twistfit-be:${BACKEND_IMAGE_TAG:-latest}
+    entrypoint: ["python3", "-c"]
+    command:
+      - |
+        from app.core.blob_storage import ensure_container
+        for c in ["wardrobe", "accessories", "blog", "forum", "results"]:
+            ensure_container(c)
+            print(f"ensured bucket: {c}")
+    environment:
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:?thiếu MINIO_PUBLIC_ENDPOINT trong .env}
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:?thiếu MINIO_ROOT_USER trong .env}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?thiếu MINIO_ROOT_PASSWORD trong .env}
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - app_net
+    restart: "no"
+
+  # Job một lần, tạo user riêng (MINIO_APP_ACCESS_KEY) chỉ có quyền
+  # đọc/ghi/list đúng 5 bucket ở trên (deploy/minio-app-policy.json) —
+  # không có quyền root. `|| true` ở dòng "user add" để chạy lại
+  # (docker compose up) không lỗi nếu user đã tồn tại từ lần trước.
+  minio-init-policy:
+    image: ghcr.io/sigpima/minio:${MINIO_IMAGE_TAG:-latest}
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" &&
+        (mc admin user add local "$$MINIO_APP_ACCESS_KEY" "$$MINIO_APP_SECRET_KEY" || true) &&
+        mc admin policy create local twistfit-app /policies/twistfit-app-policy.json &&
+        mc admin policy attach local twistfit-app --user "$$MINIO_APP_ACCESS_KEY"
+    volumes:
+      - ./deploy/minio-app-policy.json:/policies/twistfit-app-policy.json:ro
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?thiếu MINIO_ROOT_USER trong .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?thiếu MINIO_ROOT_PASSWORD trong .env}
+      MINIO_APP_ACCESS_KEY: ${MINIO_APP_ACCESS_KEY:?thiếu MINIO_APP_ACCESS_KEY trong .env}
+      MINIO_APP_SECRET_KEY: ${MINIO_APP_SECRET_KEY:?thiếu MINIO_APP_SECRET_KEY trong .env}
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - app_net
+    restart: "no"
 
 networks:
   app_net:
