@@ -46,9 +46,13 @@ services:
     env_file:
       - ./frontend/.env
     environment:
-      # Runtime (không phải build-arg) — đọc bởi next.config.ts rewrites()
-      # và bởi apiClient.ts khi chạy SSR. Không có prefix NEXT_PUBLIC_ nên
-      # không lộ ra browser bundle.
+      # Chỉ có tác dụng với apiClient.ts lúc chạy SSR (đọc runtime thật).
+      # KHÔNG có tác dụng với next.config.ts rewrites() — verify thật thì
+      # với output "standalone", rewrites() chỉ chạy 1 lần lúc `next build`,
+      # giá trị bị đóng băng vào image từ lúc đó, đổi biến này ở đây không
+      # còn ảnh hưởng gì nữa (frontend/next.config.ts đã hardcode đúng
+      # "http://backend:8000" khớp tên service ở compose này rồi). Vẫn giữ
+      # biến này vì apiClient.ts cần nó thật.
       BACKEND_INTERNAL_URL: http://backend:8000
     depends_on:
       backend:
@@ -115,7 +119,10 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?thiếu POSTGRES_PASSWORD trong .env}
       POSTGRES_DB: ${POSTGRES_DB:?thiếu POSTGRES_DB trong .env}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      # postgres:18+ đổi convention: mount ở /var/lib/postgresql (không phải
+      # .../data như bản 16) — image tự tạo subfolder theo major version bên
+      # trong. Mount nhầm chỗ cũ sẽ crash-loop ngay lúc khởi động.
+      - postgres_data:/var/lib/postgresql
     networks:
       - app_net
     restart: unless-stopped
@@ -139,6 +146,12 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:?thiếu MINIO_ROOT_USER trong .env}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?thiếu MINIO_ROOT_PASSWORD trong .env}
+      # MinIO không có CORS theo từng bucket (không implement PutBucketCors
+      # chuẩn S3 — đã verify thật, cả boto3 và `mc cors set` đều báo
+      # NotImplemented) — CORS được set ở cấp server thế này. Mặc định của
+      # biến này là "*" (cho phép mọi origin) nếu không set; ghi rõ ra đây
+      # để giới hạn đúng domain thật, thay vì để mặc định wildcard.
+      MINIO_API_CORS_ALLOW_ORIGIN: ${MINIO_CORS_ALLOW_ORIGIN:-https://twistfit.org}
     volumes:
       - minio_data:/data
     networks:
@@ -160,10 +173,11 @@ services:
     # Port 9001 (console quản trị) KHÔNG expose qua reverse-proxy — muốn
     # vào console thì SSH tunnel: ssh -L 9001:localhost:9001 <server>
 
-  # Job một lần (restart: "no"), tạo sẵn 5 bucket + set public-read policy +
-  # CORS bằng đúng code app đang dùng (ensure_container trong
+  # Job một lần (restart: "no"), tạo sẵn 5 bucket + set public-read policy
+  # bằng đúng code app đang dùng (ensure_container trong
   # backend/app/core/blob_storage.py) — chạy bằng quyền root MinIO, xong thì
-  # backend chỉ cần quyền hạn chế (xem minio-init-policy).
+  # backend chỉ cần quyền hạn chế (xem minio-init-policy). CORS không nằm ở
+  # đây — xem MINIO_API_CORS_ALLOW_ORIGIN ở service "minio" trên.
   minio-init-buckets:
     image: ghcr.io/sigpima/twistfit-be:${BACKEND_IMAGE_TAG:-latest}
     entrypoint: ["python3", "-c"]
