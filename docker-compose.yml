@@ -84,13 +84,16 @@ services:
       # không còn dùng quyền root của MinIO nữa.
       MINIO_ACCESS_KEY: ${MINIO_APP_ACCESS_KEY:?thiếu MINIO_APP_ACCESS_KEY trong .env}
       MINIO_SECRET_KEY: ${MINIO_APP_SECRET_KEY:?thiếu MINIO_APP_SECRET_KEY trong .env}
+    # Cần chạy `docker compose --profile init run --rm minio-init-buckets`
+    # và `minio-init-policy` tay ít nhất 1 lần trước khi backend start lần
+    # đầu (bucket/user MINIO_APP_ACCESS_KEY phải tồn tại sẵn) — xem ghi chú
+    # ở 2 service đó. depends_on ở đây không chờ chúng nữa vì không còn nằm
+    # trong "docker compose up" mặc định (profiles).
     depends_on:
       db:
         condition: service_healthy
-      minio-init-buckets:
-        condition: service_completed_successfully
-      minio-init-policy:
-        condition: service_completed_successfully
+      minio:
+        condition: service_healthy
     networks:
       # private_net là internal:true (không route ra Internet) — backend
       # cần join thêm public_net để có DNS/internet gọi Gemini/Flux/
@@ -178,12 +181,17 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  # Job một lần (restart: "no"), tạo sẵn 5 bucket + set public-read policy
-  # bằng đúng code app đang dùng (ensure_container trong
+  # KHÔNG chạy tự động nữa (profiles: chỉ chạy khi gọi rõ tên) — chạy tay 1
+  # lần đầu deploy, hoặc khi thêm bucket mới, bằng:
+  #   docker compose --profile init run --rm minio-init-buckets
+  #   docker compose --profile init run --rm minio-init-policy
+  # rồi mới `docker compose up -d`. Tạo sẵn 5 bucket + set public-read
+  # policy bằng đúng code app đang dùng (ensure_container trong
   # backend/app/core/blob_storage.py) — chạy bằng quyền root MinIO, xong thì
   # backend chỉ cần quyền hạn chế (xem minio-init-policy). CORS không nằm ở
   # đây — xem MINIO_API_CORS_ALLOW_ORIGIN ở service "minio" trên.
   minio-init-buckets:
+    profiles: ["init"]
     image: ghcr.io/sigpima/twistfit-be:${BACKEND_IMAGE_TAG:-latest}
     entrypoint: ["python3", "-c"]
     command:
@@ -204,19 +212,21 @@ services:
       - private_net
     restart: "no"
 
-  # Job một lần, tạo user riêng (MINIO_APP_ACCESS_KEY) chỉ có quyền
-  # đọc/ghi/list đúng 5 bucket ở trên (deploy/minio-app-policy.json) —
-  # không có quyền root. `|| true` ở dòng "user add" để chạy lại
-  # (docker compose up) không lỗi nếu user đã tồn tại từ lần trước.
+  # KHÔNG chạy tự động nữa — xem ghi chú ở minio-init-buckets. Tạo user
+  # riêng (MINIO_APP_ACCESS_KEY) chỉ có quyền đọc/ghi/list đúng 5 bucket ở
+  # trên (deploy/minio-app-policy.json), không có quyền root. Toàn bộ 3
+  # lệnh mc admin đều bọc `|| true` — chạy lại (gọi tay 2 lần, lỡ tay,...)
+  # không lỗi nếu user/policy/attach đã tồn tại sẵn từ lần trước.
   minio-init-policy:
+    profiles: ["init"]
     image: ghcr.io/sigpima/minio:${MINIO_IMAGE_TAG:-latest}
     entrypoint: ["sh", "-c"]
     command:
       - |
         mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" &&
         (mc admin user add local "$$MINIO_APP_ACCESS_KEY" "$$MINIO_APP_SECRET_KEY" || true) &&
-        mc admin policy create local twistfit-app /policies/twistfit-app-policy.json &&
-        mc admin policy attach local twistfit-app --user "$$MINIO_APP_ACCESS_KEY"
+        (mc admin policy create local twistfit-app /policies/twistfit-app-policy.json || true) &&
+        (mc admin policy attach local twistfit-app --user "$$MINIO_APP_ACCESS_KEY" || true)
     volumes:
       - ./deploy/minio-app-policy.json:/policies/twistfit-app-policy.json:ro
     environment:
