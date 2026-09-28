@@ -232,9 +232,19 @@ services:
     restart: "no"
 
 networks:
+  # MTU 1492 (không phải mặc định 1500 của Docker) — đo thật bằng
+  # `ping -M do -s 1472 <host>` từ trong container, gateway trả về
+  # "Frag needed and DF set (mtu = 1492)". Lệch 8 byte này khiến gói tin
+  # lớn (TLS handshake đầy đủ, request có body ảnh...) bị rớt âm thầm dọc
+  # đường — gây treo tới timeout khi gọi Gemini/Flux dù ping thường/DNS
+  # vẫn bình thường. Đổi lại nếu hạ tầng mạng thật thay đổi.
   public_net:
+    driver_opts:
+      com.docker.network.driver.mtu: "1492"
   private_net:
     internal: true
+    driver_opts:
+      com.docker.network.driver.mtu: "1492"
 
 volumes:
   postgres_data:
