@@ -92,7 +92,12 @@ services:
       minio-init-policy:
         condition: service_completed_successfully
     networks:
+      # private_net là internal:true (không route ra Internet) — backend
+      # cần join thêm public_net để có DNS/internet gọi Gemini/Flux/
+      # catvton-service. Không publish port nào ở đây nên vẫn không bị lộ
+      # ra ngoài — join network khác "publish port ra host".
       - private_net
+      - public_net
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
